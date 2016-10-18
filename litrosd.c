@@ -42,11 +42,22 @@
             syslog(LOG_WARNING, "%s ok.\n", #exp); \
     } while (0)
 
+static volatile bool need_exit = false;
+
+struct litros_global_t {
+    pthread_mutex_t *mutex;
+    const char *directory;
+};
+
+struct litros_thread_local_t {
+        struct litros_global_t *global;
+        int event_fd;
+};
 
 const char *usage_msg = 
     "Usage: litrosd OPTIONS\n"
     "Options:\n"
-    "\t-d:\tFolder where node configuration files and metadata are stored";
+    "\t-d:\tFolder where node configuration files and metadata are stored\n";
 
 static void usage(char *error) {
     if (error)
@@ -59,7 +70,6 @@ static void usage(char *error) {
     exit(error ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
-static const char *directory = NULL;
 
 /** Functions related to netlink connector are taken from
  *  http://bewareofgeek.livejournal.com/2945.html
@@ -136,65 +146,94 @@ static const char* get_process_name_by_pid(const int pid)
 
     name = malloc(sizeof(char) * 1024);
     if (name) {
-        sprintf(name, "/proc/%d/cmdline",pid);                                  
-        f = fopen(name,"r");                                              
-        if (f) {                                                                  
-            size_t size;                                                        
-            size = fread(name, sizeof(char), 1024, f);                          
-            if(size>0) {                                                         
-                if (name[size-1] == '\n')                                          
-                    name[size-1] = '\0';                                          
-            }                                                                   
-            fclose(f);                                                          
-        }                                                                       
-    }                                                                           
-    return name;                                                                
+        sprintf(name, "/proc/%d/cmdline", pid);
+        f = fopen(name, "r");
+        if (f) {
+            size_t size;
+            size = fread(name, sizeof(char), 1024, f);
+            if(size>0) {
+                if (name[size-1] == '\n')
+                    name[size-1] = '\0';
+            }
+            fclose(f);
+        }
+    }
+    return name;
 }
 
-static volatile bool need_exit = false;
-
-struct litros_global_t {
-    pthread_mutex_t *mutex;
-}
-
-struct litros_thread_local_t {
-        struct litrosd_global *global;
-        int event_id;
-};
-
-void *thread_cleanup(void *args) {
+void thread_cleanup(void *args) {
     struct litros_thread_local_t *local = (struct litros_thread_local_t*)args;
     
     pthread_mutex_unlock(local->global->mutex);
-    close(local->event_id);
+    close(local->event_fd);
 }
 
 void *check_file_changes(void *args) 
 {
-    int event_id;
+    int event_fd;
+    int wd;
     struct litros_global_t *global;
     struct litros_thread_local_t local;
+    char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+    const struct inotify_event *event;
+    char *ptr;
+    int len;
 
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-    memset(&local, 0, sizeof(litro_thread_local_t));
-    global = (struct litrosd_global*)args;
+    memset(&local, 0, sizeof(struct litros_thread_local_t));
+    global = (struct litros_global_t*)args;
 
-    event_id = inotify_init();
-    if (event_id < 0) {
+    event_fd = inotify_init();
+    if (event_fd < 0) {
         syslog(LOG_WARNING, "inotify_init() failed. litrosd will not detect"
         "changes in configuration file directory");
-        return;
+        pthread_exit(NULL);
     }
 
     local.global = global;
-    local.event_id = event_id;
+    local.event_fd = event_fd;
     
     pthread_cleanup_push(thread_cleanup, &local);
+
+    wd = inotify_add_watch(event_fd, global->directory,
+                IN_CREATE | IN_DELETE | IN_MODIFY);
+
+    if (wd < 0) {
+        syslog(LOG_WARNING, "inotify_add_watch() failed. litrosd will not detect"
+        " changes in configuration file directory");
+        pthread_exit(NULL);
+    }
     
+    while (1) {
+        len = read(event_fd, buf, sizeof(buf));
+        if (len == -1 && errno != EAGAIN) {
+            syslog(LOG_ERR, "inotify_event read error");
+            continue;
+        }
+
+        for (ptr = buf; ptr < buf + len; 
+            ptr += sizeof(struct inotify_event) + event->len) {
+
+            event = (const struct inotify_event *) ptr;
+            if (event->mask & IN_CREATE)
+                syslog(LOG_WARNING, "IN_CREATE: %s", event->name);
+            if (event->mask & IN_DELETE)
+                syslog(LOG_WARNING, "IN_DELETE: %s", event->name);
+            if (event->mask & IN_MODIFY)
+                syslog(LOG_WARNING, "IN_MODIFY: %s", event->name);
+        }
+    }
+    /**
+     * Every cleanup_push must be paired with a cleanup_pop
+     * Otherwise, gcc keeps emitting esoteric warnings!
+     */
+    pthread_cleanup_pop(1);
+    return NULL;
 }
 
-static int handle_proc_ev(int nl_sock)                                          
-{                                                                               
+static int handle_proc_ev(int nl_sock)
+{
     int rc;
     struct __attribute__ ((aligned(NLMSG_ALIGNTO))) {
         struct nlmsghdr nl_hdr;
@@ -266,9 +305,6 @@ static void on_shutdown(int sig)
     need_exit = true;
 }
 
-
-
-
 void litros_init(void) {
 
     pid_t sid;
@@ -295,12 +331,15 @@ void litros_init(void) {
 }
 
 #define OPTSTR "d:"
-int main(int argc, char **argv) {
+
+int main(int argc, char **argv)
+{
     pid_t pid;
     int nl_sock;
     int ret = EXIT_SUCCESS;
     int opt;
-    struct litrosd_global global;
+    struct litros_global_t *global;
+    const char *directory = NULL;
     pthread_t io_tid;
 
     while ((opt = getopt(argc, argv, OPTSTR)) != -1) {
@@ -324,13 +363,13 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     else if (pid > 0)
         exit(EXIT_SUCCESS);
-
     litros_init();
 
-    memset(&global, 0, sizeof(struct litrosd_global));
-    CALL (pthread_mutex_init(global->mutex, NULL) );
+    global = malloc(sizeof(struct litros_global_t));
+    global->directory = directory;
+    CALL ( pthread_mutex_init(global->mutex, NULL) );
 
-    pthread_crate(&io_tid, NULL, check_file_changes, &global);
+    pthread_create(&io_tid, NULL, check_file_changes, global);
 
     CALL_ASSIGNMENT( nl_sock = nl_connect() );
     ret = set_proc_ev_listen(nl_sock, true);
@@ -343,7 +382,8 @@ int main(int argc, char **argv) {
         ret = EXIT_FAILURE;
         goto out;
     }
-
+    
+    pthread_cancel(io_tid);
     set_proc_ev_listen(nl_sock, false);
 
 out:

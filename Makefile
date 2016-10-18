@@ -9,7 +9,7 @@ HEADERS			+= -I${LIBLITMUS}/arch/x86/include/generated/uapi
 #prefix ?= /usr/local
 
 LDFLAGS			= -L${LIBLITMUS}
-LDLIBS 			= -llitmus -lcjson -lm
+LDLIBS 			= -llitmus -lcjson -lm -lpthread
 CPPFLAGS		= ${HEADERS}
 CFLAGS			= -g -Wall -Wextra -Wdeclaration-after-statement
 
