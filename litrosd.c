@@ -14,9 +14,14 @@
 #include <stdbool.h>
 #include <sys/inotify.h>
 #include <pthread.h>
+#include <sys/queue.h>
+#include <dirent.h>
 
 #include "cJSON.h"
+#include "common.h"
 #include "litros_rt_param.h"
+
+#define MAX_CONFIG_LEN 1024
 
 #define CALL( exp ) do { \
         int ret; \
@@ -47,6 +52,7 @@ static volatile bool need_exit = false;
 struct litros_global_t {
     pthread_mutex_t *mutex;
     const char *directory;
+    LIST_HEAD(listhead, rt_node_status_t) head;
 };
 
 struct litros_thread_local_t {
@@ -330,22 +336,70 @@ void litros_init(void) {
     
 }
 
+int parse_params(const char *args, struct rt_node_t *params)
+{
+    cJSON *root = NULL;
+    static int tmp_int;
+    static char tmp_str[64];
+    static double tmp_double;
+
+    root = cJSON_Parse(args);
+    if (!root)
+        return -1;    
+
+    tmp_double = cJSON_GetObjectItem(root, "period")->valuedouble;
+    params->period = tmp_double;
+    tmp_double = cJSON_GetObjectItem(root, "budget")->valuedouble;
+    params->budget = tmp_double;
+    tmp_double = cJSON_GetObjectItem(root, "deadline")->valuedouble;
+    params->deadline = tmp_double;
+    tmp_double = cJSON_GetObjectItem(root, "offset")->valuedouble;
+    params->offset = tmp_double;
+
+
+    tmp_int = cJSON_GetObjectItem(root, "priority")->valueint;
+    params->priority = tmp_int;
+    tmp_int = cJSON_GetObjectItem(root, "partition")->valueint;
+    params->partition = tmp_int;
+    tmp_int = cJSON_GetObjectItem(root, "res_id")->valueint;
+    params->res_id = tmp_int;
+
+    strcpy(tmp_str, cJSON_GetObjectItem(root, "res_str")->valuestring);
+    params->res_str = tmp_str;
+    strcpy(tmp_str, cJSON_GetObjectItem(root, "task_id")->valuestring);
+    params->task_id = tmp_str;
+    
+    params->res_type = parse_reservation_type(params->res_str);
+    return 0;
+}
+
 #define OPTSTR "d:"
 
 int main(int argc, char **argv)
 {
     pid_t pid;
+    pthread_t io_tid;
+
     int nl_sock;
     int ret = EXIT_SUCCESS;
     int opt;
     struct litros_global_t *global;
-    const char *directory = NULL;
-    pthread_t io_tid;
+     
+    char config_str[MAX_CONFIG_LEN] = "";
+    char config_filename[128] = "";
+    FILE *config_fp = NULL;
+    size_t config_len;
+
+    char directory[128] = "";
+    DIR *dp = NULL;
+    struct dirent *ep = NULL;
+    size_t dir_len;
+    struct rt_node_status_t *tmp_status;
 
     while ((opt = getopt(argc, argv, OPTSTR)) != -1) {
         switch (opt) {
             case 'd':
-                directory = optarg;
+                strcpy(directory, optarg);
                 break;
             default:
                 usage("bad argument");
@@ -353,7 +407,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (directory == NULL) {
+    if (strlen(directory) == 0) {
         usage("directory must be specified with -d");
         exit(EXIT_FAILURE);
     }
@@ -365,9 +419,51 @@ int main(int argc, char **argv)
         exit(EXIT_SUCCESS);
     litros_init();
 
+    dp = opendir(directory);
+    if (!dp) {
+        syslog(LOG_ERR, "opendir(): %s", strerror(errno));
+        closelog();
+        exit(EXIT_FAILURE);
+    }
+
+    dir_len = strlen(directory);
+    if (directory[dir_len - 1] != '/')
+        strcat(directory, "/");
+
+
     global = malloc(sizeof(struct litros_global_t));
     global->directory = directory;
     CALL ( pthread_mutex_init(global->mutex, NULL) );
+    LIST_INIT(&global->head); 
+
+    while ( (ep = readdir(dp)) ) {
+        sprintf(config_filename, "%s%s", directory, ep->d_name);
+        if (ep->d_type != DT_REG)
+            continue;
+        syslog(LOG_WARNING, "reading configuration from %s", config_filename);
+        config_fp = fopen(config_filename, "r");
+        config_len = fread(config_str, sizeof(char), MAX_CONFIG_LEN, config_fp);
+        if (config_len == 0) {
+            syslog(LOG_WARNING, "empty file %s", ep->d_name);
+        }
+        else{
+            config_str[++config_len] = '\0';
+            tmp_status = malloc(sizeof(struct rt_node_status_t));
+            tmp_status->node = malloc(sizeof(struct rt_node_t));
+            tmp_status->is_rt = 0; 
+            ret = parse_params(config_str, tmp_status->node);
+            if (ret != 0)
+                syslog(LOG_ERR, "could not parse JSON file %s", ep->d_name);
+            else {
+                syslog(LOG_WARNING, "parsed JSON file %s", ep->d_name);
+                syslog(LOG_WARNING, "node parameters:\n%s", 
+                        param_to_str(tmp_status->node));
+                LIST_INSERT_HEAD(&global->head, tmp_status, list);
+            }
+        }
+    }
+    if (errno == EBADF)
+        syslog(LOG_ERR, "readdir(): %s", strerror(errno));
 
     pthread_create(&io_tid, NULL, check_file_changes, global);
 
@@ -385,6 +481,7 @@ int main(int argc, char **argv)
     
     pthread_cancel(io_tid);
     set_proc_ev_listen(nl_sock, false);
+    free(global);
 
 out:
     close(nl_sock);

@@ -27,7 +27,7 @@ cjson:
 
 litrosd: litros_rt_param.c litrosd.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -c litros_rt_param.c $(LDLIBS)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o litrosd litrosd.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o litrosd litros_rt_param.o litrosd.c $(LDLIBS)
 
 clean:
 	$(MAKE) -C ${cJSON} clean
