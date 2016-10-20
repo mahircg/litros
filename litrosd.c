@@ -16,36 +16,61 @@
 #include <pthread.h>
 #include <sys/queue.h>
 #include <dirent.h>
+#include <libgen.h>
+
 
 #include "cJSON.h"
 #include "common.h"
+#include "litmus.h"
 #include "litros_rt_param.h"
 
 #define MAX_CONFIG_LEN 1024
+#define RETRY_COUNT 50
 
 #define CALL( exp ) do { \
-        int ret; \
-        ret = exp; \
-        if (ret != 0) {\
-            syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
-            closelog();\
-            exit(EXIT_FAILURE);\
-        }\
-        else \
-            syslog(LOG_WARNING, "%s ok.\n", #exp); \
-    } while (0)
+    int ret; \
+    ret = exp; \
+    if (ret != 0) {\
+        syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
+        closelog();\
+        exit(EXIT_FAILURE);\
+    }\
+    else \
+        syslog(LOG_WARNING, "%s ok.\n", #exp); \
+} while (0)
 
 #define CALL_ASSIGNMENT( exp ) do { \
-        int ret; \
-        ret = exp; \
-        if (ret < 0) {\
-            syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
-            closelog();\
-            exit(EXIT_FAILURE);\
-        }\
-        else \
-            syslog(LOG_WARNING, "%s ok.\n", #exp); \
-    } while (0)
+    int ret; \
+    ret = exp; \
+    if (ret < 0) {\
+        syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
+        closelog();\
+        exit(EXIT_FAILURE);\
+    }\
+    else \
+        syslog(LOG_WARNING, "%s ok.\n", #exp); \
+} while (0)
+
+/** This macro assumes there is an integer variable ret and struct rt_status
+  * defined in the current scope.
+  */
+
+#define CALL_LITMUS( exp ) do { \
+    ret = exp; \
+    if (ret < 0) { \
+        syslog(LOG_WARNING, "%s failed: tid: %d, res_id: %d, task_id:%s", \
+        #exp, rt_status->pid, rt_status->node->res_id, \
+        rt_status->node->task_id); \
+        return -1; \
+    } \
+    else { \
+        syslog(LOG_WARNING, "%s succeeded: tid: %d, res_id: %d, task_id:%s", \
+        #exp, rt_status->pid, rt_status->node->res_id, \
+        rt_status->node->task_id); \
+    } \
+} while(0) 
+        
+
 
 static volatile bool need_exit = false;
 
@@ -56,9 +81,15 @@ struct litros_global_t {
 };
 
 struct litros_thread_local_t {
-        struct litros_global_t *global;
         int event_fd;
 };
+
+int parse_and_insert(const char * filename, const char *filepath);
+
+struct rt_node_status_t *get_node_by_task_id(const char *task_id);
+struct rt_node_status_t *get_node_by_pid(pid_t pid);
+
+struct litros_global_t *global;
 
 const char *usage_msg = 
     "Usage: litrosd OPTIONS\n"
@@ -148,37 +179,102 @@ static int set_proc_ev_listen(int nl_sock, bool enable)
 static const char* get_process_name_by_pid(const int pid)                       
 {
     FILE *f;
-    char* name;
-
-    name = malloc(sizeof(char) * 1024);
-    if (name) {
-        sprintf(name, "/proc/%d/cmdline", pid);
-        f = fopen(name, "r");
-        if (f) {
-            size_t size;
-            size = fread(name, sizeof(char), 1024, f);
-            if(size>0) {
-                if (name[size-1] == '\n')
-                    name[size-1] = '\0';
-            }
-            fclose(f);
+    static char name[1024];
+    sprintf(name, "/proc/%d/cmdline", pid);
+    f = fopen(name, "r");
+    if (f) {
+        size_t size;
+        size = fread(name, sizeof(char), 1024, f);
+        if(size>0) {
+            if (name[size-1] == '\n')
+                name[size-1] = '\0';
         }
+        fclose(f);
     }
-    return name;
+    return basename(name);
+}
+
+int create_reservation(struct rt_node_t *rt_node) 
+{
+    static struct reservation_config config;
+    int ret = 0;
+    config.id = rt_node->res_id;
+    config.cpu = rt_node->partition;                                     
+    config.priority = rt_node->priority;                                 
+    syslog(LOG_WARNING, "trying to create R%d", rt_node->res_id);
+
+    switch (rt_node->res_type) {                                         
+        case PERIODIC_POLLING:                                                
+        case SPORADIC_POLLING:                                                
+        case SOFT_POLLING:                                                    
+            config.polling_params.budget = ms2ns(rt_node->budget);           
+            config.polling_params.period = ms2ns(rt_node->period);           
+            config.polling_params.offset = ms2ns(rt_node->offset);           
+            config.polling_params.relative_deadline
+                = ms2ns(rt_node->deadline);
+            break;
+        case SPORADIC_SERVER:                                                 
+            config.sporadic_server_params.budget = ms2ns(rt_node->budget);   
+            config.sporadic_server_params.period = ms2ns(rt_node->period);   
+            break;
+        case DEFERRABLE_SERVER:                                               
+            config.deferrable_server_params.budget = ms2ns(rt_node->budget); 
+            config.deferrable_server_params.period = ms2ns(rt_node->period); 
+            config.deferrable_server_params.offset = ms2ns(rt_node->offset); 
+            config.deferrable_server_params.relative_deadline
+                = ms2ns(rt_node->deadline);                                    
+            break;                                                              
+        case CONSTANT_BANDWIDTH_SERVER:                                       
+        case HARD_CONSTANT_BANDWIDTH_SERVER:                                  
+        case CASH_CBS:                                                        
+        case FLEXIBLE_CBS:                                                    
+        case SLASH_SERVER:                                                    
+            config.cbs_params.budget = ms2ns(rt_node->budget);               
+            config.cbs_params.period = ms2ns(rt_node->period);               
+            break;
+        default:
+            ret = -1;
+            break;
+    }
+    ret = reservation_create(rt_node->res_type, &config);
+    return ret; 
+}
+
+int attach_node(struct rt_node_status_t *rt_status, pid_t tid)
+{
+    struct rt_task param;
+    struct rt_node_t *rt_node = rt_status->node;
+    struct sched_param linux_param;
+    int ret;
+
+    CALL_LITMUS( be_migrate_thread_to_cpu(tid, rt_node->partition) );
+
+    init_rt_task_param(&param);
+    /* dummy values */ 
+    param.exec_cost = ms2ns(100);
+    param.period = ms2ns(100);
+    /* specify reservation as "virtual" CPU */
+    param.cpu = rt_node->res_id;
+
+    CALL_LITMUS( set_rt_task_param(tid, &param) );
+
+    linux_param.sched_priority = 0;
+
+    CALL( sched_setscheduler(tid, SCHED_LITMUS, &linux_param) );
+    return 0;
 }
 
 void thread_cleanup(void *args) {
     struct litros_thread_local_t *local = (struct litros_thread_local_t*)args;
     
-    pthread_mutex_unlock(local->global->mutex);
+    pthread_mutex_unlock(global->mutex);
     close(local->event_fd);
 }
 
-void *check_file_changes(void *args) 
+void *check_file_changes(__attribute__ ((unused)) void *args) 
 {
     int event_fd;
     int wd;
-    struct litros_global_t *global;
     struct litros_thread_local_t local;
     char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
     const struct inotify_event *event;
@@ -188,7 +284,6 @@ void *check_file_changes(void *args)
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     memset(&local, 0, sizeof(struct litros_thread_local_t));
-    global = (struct litros_global_t*)args;
 
     event_fd = inotify_init();
     if (event_fd < 0) {
@@ -197,7 +292,6 @@ void *check_file_changes(void *args)
         pthread_exit(NULL);
     }
 
-    local.global = global;
     local.event_fd = event_fd;
     
     pthread_cleanup_push(thread_cleanup, &local);
@@ -211,19 +305,25 @@ void *check_file_changes(void *args)
         pthread_exit(NULL);
     }
     
-    while (1) {
+    while (!need_exit) {
         len = read(event_fd, buf, sizeof(buf));
-        if (len == -1 && errno != EAGAIN) {
+        if (len == -1) { 
+            if (errno == EINTR)
+                continue;
             syslog(LOG_ERR, "inotify_event read error");
-            continue;
         }
-
+        /** Acquire the mutex, check if a file is modified and reflect the
+         *  changes if necessary.
+         */
         for (ptr = buf; ptr < buf + len; 
             ptr += sizeof(struct inotify_event) + event->len) {
 
             event = (const struct inotify_event *) ptr;
-            if (event->mask & IN_CREATE)
-                syslog(LOG_WARNING, "IN_CREATE: %s", event->name);
+            if (event->mask & IN_CREATE) {
+                syslog(LOG_WARNING, "File %s created. Trying to"
+                " parse and add to node list", event->name);
+                parse_and_insert(event->name, global->directory);
+            }
             if (event->mask & IN_DELETE)
                 syslog(LOG_WARNING, "IN_DELETE: %s", event->name);
             if (event->mask & IN_MODIFY)
@@ -238,9 +338,78 @@ void *check_file_changes(void *args)
     return NULL;
 }
 
+int switch_to_rt(pid_t pid)
+{
+    /** use a hash table or something since this operation is
+     *  on the critical path and any further ways to avoid
+     *  O(N) list traversal will improve the performance
+     */
+    const char *process_name;
+    int ret;
+    struct rt_node_status_t *rt_status;
+
+    process_name = get_process_name_by_pid(pid);
+    rt_status = get_node_by_task_id(process_name);
+    if (rt_status) {
+        if (rt_status->is_rt) {
+            syslog(LOG_WARNING, "ROS node %s is already running!",
+            process_name);
+            return -1;
+        }
+        else {
+            syslog(LOG_WARNING, "ROS node %s has been started with PID %d",
+                process_name, pid) ;
+            pthread_mutex_lock(global->mutex);
+            rt_status->pid = pid;
+            rt_status->is_rt = 1;
+            pthread_mutex_unlock(global->mutex);
+            CALL_LITMUS( create_reservation(rt_status->node) );
+            CALL_LITMUS( attach_node(rt_status, pid) );
+            CALL_LITMUS( init_litmus() );
+            return 0;
+        }
+    }
+    else
+        return ESRCH;
+}
+
+int switch_to_bg(pid_t pid)
+{
+    struct rt_node_status_t *rt_status;
+    struct rt_node_t *rt_node;
+    int ret;
+    int i = 0;
+
+    rt_status = get_node_by_pid(pid);
+    if (rt_status) {
+        rt_node = rt_status->node;
+        pthread_mutex_lock(global->mutex);
+        rt_status->pid = 0;
+        rt_status->is_rt = 0;
+        pthread_mutex_unlock(global->mutex);
+        syslog(LOG_WARNING, "ROS node %s with PID %d has been terminated",
+            rt_status->node->task_id, pid);
+        do {
+            ret = reservation_destroy(rt_node->res_id, rt_node->partition);
+            if (i++ > RETRY_COUNT)
+                break;
+        } while(ret != 0);
+
+        if (ret == 0)
+            syslog(LOG_WARNING, "removed reservation %d", rt_node->res_id);
+        else
+            syslog(LOG_WARNING, "could not remove reservation %d",
+            rt_node->res_id);
+        return ret;
+    }
+    return ESRCH;
+}
 static int handle_proc_ev(int nl_sock)
 {
     int rc;
+    pid_t p_pid;
+    int ret;
+
     struct __attribute__ ((aligned(NLMSG_ALIGNTO))) {
         struct nlmsghdr nl_hdr;
         struct __attribute__ ((__packed__)) {
@@ -252,10 +421,10 @@ static int handle_proc_ev(int nl_sock)
     while (!need_exit) {
         rc = recv(nl_sock, &nlcn_msg, sizeof(nlcn_msg), 0);
         if (rc == 0) {
-            /* shutdown? */
             return 0;
         } else if (rc == -1) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             syslog(LOG_ERR, "netlink recv");
             return -1;
         }
@@ -263,41 +432,32 @@ static int handle_proc_ev(int nl_sock)
             case PROC_EVENT_NONE:
                 printf("set mcast listen ok\n");
                 break;
-            case PROC_EVENT_FORK:
-                syslog(LOG_WARNING, "fork: parent tid=%d pid=%d -> child tid=%d pid=%d\n",   
-                        nlcn_msg.proc_ev.event_data.fork.parent_pid,            
-                        nlcn_msg.proc_ev.event_data.fork.parent_tgid,           
-                        nlcn_msg.proc_ev.event_data.fork.child_pid,             
-                        nlcn_msg.proc_ev.event_data.fork.child_tgid);           
-                break;
-            case PROC_EVENT_EXEC:                                               
-                syslog(LOG_WARNING, "exec: tid=%d pid=%d name=%s\n",                         
-                        nlcn_msg.proc_ev.event_data.exec.process_pid,           
-                        nlcn_msg.proc_ev.event_data.exec.process_tgid,          
-                        get_process_name_by_pid(nlcn_msg.proc_ev.event_data.exec.process_pid));
+            case PROC_EVENT_EXEC:
+                p_pid = nlcn_msg.proc_ev.event_data.exec.process_pid;
+                ret = switch_to_rt(p_pid);
+                if (ret != ESRCH) {
+                    if (ret == 0)
+                        syslog(LOG_WARNING, "switched to RT mode");
+                    else
+                        syslog(LOG_ERR, "could not switch to RT mode");
+                }
                 break;                                                          
-            case PROC_EVENT_UID:                                                
-                syslog(LOG_WARNING, "uid change: tid=%d pid=%d from %d to %d\n",             
-                        nlcn_msg.proc_ev.event_data.id.process_pid,             
-                        nlcn_msg.proc_ev.event_data.id.process_tgid,            
-                        nlcn_msg.proc_ev.event_data.id.r.ruid,                  
-                        nlcn_msg.proc_ev.event_data.id.e.euid);                 
-                break;                                                          
-            case PROC_EVENT_GID:                                                
-                syslog(LOG_WARNING, "gid change: tid=%d pid=%d from %d to %d\n",             
-                        nlcn_msg.proc_ev.event_data.id.process_pid,             
-                        nlcn_msg.proc_ev.event_data.id.process_tgid,            
-                        nlcn_msg.proc_ev.event_data.id.r.rgid,                  
-                        nlcn_msg.proc_ev.event_data.id.e.egid);                 
-                break;
             case PROC_EVENT_EXIT:
-                syslog(LOG_WARNING, "exit: tid=%d pid=%d exit_code=%d\n",
-                        nlcn_msg.proc_ev.event_data.exit.process_pid,
-                        nlcn_msg.proc_ev.event_data.exit.process_tgid,
-                        nlcn_msg.proc_ev.event_data.exit.exit_code);
+                /** By default, ROS kills the previous node instance if the
+                  * same node is started twice. It should be taken 
+                  * care of somehow
+                  */
+                p_pid = nlcn_msg.proc_ev.event_data.exec.process_pid;
+                ret = switch_to_bg(p_pid);
+                if (ret != ESRCH) {
+                    if (ret == 0)
+                        syslog(LOG_WARNING, "ROS node is terminated successfully");
+                    else
+                        syslog(LOG_ERR, "ROS not could not terminate!");
+                }
                 break;
             default:
-                syslog(LOG_WARNING, "unhandled proc event\n");
+                /* Do not log all messages, at least for now */
                 break;                                                          
         }
     }
@@ -333,14 +493,28 @@ void litros_init(void) {
      
     sigaction(SIGINT, &sig, NULL);
     sigaction(SIGTERM, &sig, NULL);
+
     
 }
 
+int check_params(struct rt_node_t *rt_node)
+{
+    if (rt_node->res_type == -1)
+        return -1;
+
+    if (rt_node->period <= 0 || rt_node->budget <= 0 
+            || (rt_node->budget >= rt_node->period) )
+        return -1;
+
+    if (rt_node->partition < 0)
+        return -1;
+    
+    return 0;
+}
 int parse_params(const char *args, struct rt_node_t *params)
 {
-    cJSON *root = NULL;
+    cJSON *root;
     static int tmp_int;
-    static char tmp_str[64];
     static double tmp_double;
 
     root = cJSON_Parse(args);
@@ -364,14 +538,130 @@ int parse_params(const char *args, struct rt_node_t *params)
     tmp_int = cJSON_GetObjectItem(root, "res_id")->valueint;
     params->res_id = tmp_int;
 
-    strcpy(tmp_str, cJSON_GetObjectItem(root, "res_str")->valuestring);
-    params->res_str = tmp_str;
-    strcpy(tmp_str, cJSON_GetObjectItem(root, "task_id")->valuestring);
-    params->task_id = tmp_str;
+    strcpy(params->res_str, cJSON_GetObjectItem(root, "res_str")->valuestring);
+    strcpy(params->task_id, cJSON_GetObjectItem(root, "task_id")->valuestring);
     
     params->res_type = parse_reservation_type(params->res_str);
     return 0;
 }
+
+struct rt_node_status_t *get_node_by_task_id(const char *task_id)
+{
+
+    struct rt_node_status_t *it;
+    pthread_mutex_lock(global->mutex);
+    for (it = global->head.lh_first; it != NULL; it = it->list.le_next) {
+        if (strcmp(it->node->task_id, task_id) == 0) {
+            pthread_mutex_unlock(global->mutex);
+            return it;
+        }
+    }
+    pthread_mutex_unlock(global->mutex);
+    return NULL;
+}
+
+struct rt_node_status_t *get_node_by_pid(pid_t pid)
+{
+
+    struct rt_node_status_t *it;
+    pthread_mutex_lock(global->mutex);
+    for (it = global->head.lh_first; it != NULL; it = it->list.le_next) {
+        if (it->pid == pid) {
+            pthread_mutex_unlock(global->mutex);
+            return it;
+        }
+    }
+    pthread_mutex_unlock(global->mutex);
+    return NULL;
+}
+
+int remove_on_node_exit(pid_t pid)
+{
+    struct rt_node_status_t *it;
+    int ret = -1;
+    syslog(LOG_WARNING, "trying to remove the reservation of PID %d", pid);
+    for (it = global->head.lh_first; it != NULL; it = it->list.le_next) {
+        if (it->pid == pid && it->is_rt == 1) {
+            ret = reservation_destroy(it->node->res_id, it->node->partition);
+            if (ret == -1)
+                syslog(LOG_WARNING, "could not remove reservation %d on cpu %d",
+                it->node->res_id, it->node->partition);
+            else
+                 syslog(LOG_WARNING, "removed reservation %d on cpu %d",
+                 it->node->res_id, it->node->partition);
+            LIST_REMOVE(it, list);
+            free(it->node);
+            free(it);
+            return ret;
+        }
+    }
+
+    return ret; 
+}
+int parse_and_insert(const char * filename, const char *filepath)
+{
+    int ret;
+    struct rt_node_status_t *tmp_status;
+    struct rt_node_status_t *it;
+
+
+    char config_str[MAX_CONFIG_LEN] = "";
+    FILE *config_fp = NULL;
+    size_t config_len;
+
+    syslog(LOG_WARNING, "reading configuration from %s", filepath);
+    config_fp = fopen(filepath, "r");
+    config_len = fread(config_str, sizeof(char), MAX_CONFIG_LEN, config_fp);
+    if (config_len == 0) {
+        syslog(LOG_WARNING, "empty file %s", filename);
+        ret = -1;
+    }
+    else{
+        config_str[++config_len] = '\0';
+        tmp_status = malloc(sizeof(struct rt_node_status_t));
+        tmp_status->node = malloc(sizeof(struct rt_node_t));
+        tmp_status->is_rt = 0;
+        tmp_status->pid = 0;
+        ret = parse_params(config_str, tmp_status->node);
+        if (ret != 0)
+            syslog(LOG_ERR, "could not parse JSON file %s", filename);
+        else {
+            syslog(LOG_WARNING, "parsed JSON file %s", filename);
+            syslog(LOG_WARNING, "node parameters:\n%s", 
+                    param_to_str(tmp_status->node));
+            for (it = global->head.lh_first; it != NULL; it = it->list.le_next) {
+                if (strcmp(it->node->task_id, tmp_status->node->task_id) == 0) {
+                    syslog(LOG_WARNING, "Task %s in file %s is already added"
+                    " ,skipping!", it->node->task_id, filename);
+                    goto err;
+                }
+                else if (it->node->res_id == tmp_status->node->res_id) {
+                    syslog(LOG_WARNING, "res_id %d in file %s is already added"
+                    " ,skipping!", it->node->res_id, filename);
+                    goto err;
+                }
+            }
+            syslog(LOG_WARNING, "checking RT parameters");
+            ret = check_params(tmp_status->node);
+            if (ret == 0) {
+                syslog(LOG_WARNING, "RT parameters are valid");
+                pthread_mutex_lock(global->mutex);
+                LIST_INSERT_HEAD(&global->head, tmp_status, list);
+                pthread_mutex_unlock(global->mutex);
+            }
+            else
+                goto err;
+        }
+    }
+    return ret;
+
+err:    
+    syslog(LOG_ERR, "RT parameters are invalid");
+    free(tmp_status->node);
+    free(tmp_status);
+    return -1;
+}
+
 
 #define OPTSTR "d:"
 
@@ -383,18 +673,13 @@ int main(int argc, char **argv)
     int nl_sock;
     int ret = EXIT_SUCCESS;
     int opt;
-    struct litros_global_t *global;
-     
-    char config_str[MAX_CONFIG_LEN] = "";
-    char config_filename[128] = "";
-    FILE *config_fp = NULL;
-    size_t config_len;
 
     char directory[128] = "";
+    size_t dir_len;
     DIR *dp = NULL;
     struct dirent *ep = NULL;
-    size_t dir_len;
-    struct rt_node_status_t *tmp_status;
+    char config_filename[128] = "";
+    struct rt_node_status_t *rt_node_status;
 
     while ((opt = getopt(argc, argv, OPTSTR)) != -1) {
         switch (opt) {
@@ -433,39 +718,24 @@ int main(int argc, char **argv)
 
     global = malloc(sizeof(struct litros_global_t));
     global->directory = directory;
+    global->mutex = malloc(sizeof(pthread_mutex_t));
     CALL ( pthread_mutex_init(global->mutex, NULL) );
     LIST_INIT(&global->head); 
 
     while ( (ep = readdir(dp)) ) {
-        sprintf(config_filename, "%s%s", directory, ep->d_name);
         if (ep->d_type != DT_REG)
             continue;
-        syslog(LOG_WARNING, "reading configuration from %s", config_filename);
-        config_fp = fopen(config_filename, "r");
-        config_len = fread(config_str, sizeof(char), MAX_CONFIG_LEN, config_fp);
-        if (config_len == 0) {
-            syslog(LOG_WARNING, "empty file %s", ep->d_name);
-        }
-        else{
-            config_str[++config_len] = '\0';
-            tmp_status = malloc(sizeof(struct rt_node_status_t));
-            tmp_status->node = malloc(sizeof(struct rt_node_t));
-            tmp_status->is_rt = 0; 
-            ret = parse_params(config_str, tmp_status->node);
-            if (ret != 0)
-                syslog(LOG_ERR, "could not parse JSON file %s", ep->d_name);
-            else {
-                syslog(LOG_WARNING, "parsed JSON file %s", ep->d_name);
-                syslog(LOG_WARNING, "node parameters:\n%s", 
-                        param_to_str(tmp_status->node));
-                LIST_INSERT_HEAD(&global->head, tmp_status, list);
-            }
-        }
+        sprintf(config_filename, "%s%s", directory, ep->d_name);
+        ret = parse_and_insert(ep->d_name, config_filename);
+        if (ret == 0)
+            syslog(LOG_WARNING, "config inserted into the list");
+        else
+            syslog(LOG_WARNING, "config could not be inserted into list");
     }
     if (errno == EBADF)
         syslog(LOG_ERR, "readdir(): %s", strerror(errno));
 
-    pthread_create(&io_tid, NULL, check_file_changes, global);
+    pthread_create(&io_tid, NULL, check_file_changes, NULL);
 
     CALL_ASSIGNMENT( nl_sock = nl_connect() );
     ret = set_proc_ev_listen(nl_sock, true);
@@ -478,8 +748,14 @@ int main(int argc, char **argv)
         ret = EXIT_FAILURE;
         goto out;
     }
-    
-    pthread_cancel(io_tid);
+
+    while (global->head.lh_first != NULL) {
+        rt_node_status = global->head.lh_first;
+        LIST_REMOVE(rt_node_status, list);
+        free(rt_node_status->node);
+        free(rt_node_status);
+
+    }
     set_proc_ev_listen(nl_sock, false);
     free(global);
 

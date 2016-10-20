@@ -3,14 +3,15 @@
 
 #include <stdio.h>
 #include <sys/queue.h>
+#include <sys/types.h>
 #include "common.h"
 
 
 
 struct rt_node_t{
-    const char* res_str;
-    const char* task_id;
-	reservation_type_t res_type;
+    char res_str[64];
+    char task_id[64];
+	int res_type;
 	int partition;
 	int priority;
 	double period;
@@ -23,7 +24,8 @@ struct rt_node_t{
 struct rt_node_status_t {
     struct rt_node_t *node;
     int is_rt;
-    LIST_ENTRY(rt_node_status) list;
+    pid_t pid;
+    LIST_ENTRY(rt_node_status_t) list;
 };
 
 const char *param_to_str(struct rt_node_t *params);
