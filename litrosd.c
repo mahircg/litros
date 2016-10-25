@@ -28,15 +28,16 @@
 #define RETRY_COUNT 50
 
 #define CALL( exp ) do { \
-    int ret; \
+	int ret; \
     ret = exp; \
     if (ret != 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
         closelog();\
-        exit(EXIT_FAILURE);\
-    }\
-    else \
+        return ret; \
+    } \
+    else { \
         syslog(LOG_WARNING, "%s ok.\n", #exp); \
+	} \
 } while (0)
 
 #define CALL_ASSIGNMENT( exp ) do { \
@@ -45,10 +46,11 @@
     if (ret < 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
         closelog();\
-        exit(EXIT_FAILURE);\
+        return ret; \
     }\
-    else \
+    else { \
         syslog(LOG_WARNING, "%s ok.\n", #exp); \
+	} \
 } while (0)
 
 /** This macro assumes there is an integer variable ret and struct rt_status
@@ -61,15 +63,15 @@
         syslog(LOG_WARNING, "%s failed: tid: %d, res_id: %d, task_id:%s", \
         #exp, rt_status->pid, rt_status->node->res_id, \
         rt_status->node->task_id); \
-        return -1; \
+        return ret; \
     } \
     else { \
         syslog(LOG_WARNING, "%s succeeded: tid: %d, res_id: %d, task_id:%s", \
         #exp, rt_status->pid, rt_status->node->res_id, \
         rt_status->node->task_id); \
     } \
-} while(0) 
-        
+} while(0)
+
 
 
 static volatile bool need_exit = false;
@@ -199,45 +201,45 @@ int create_reservation(struct rt_node_t *rt_node)
     static struct reservation_config config;
     int ret = 0;
     config.id = rt_node->res_id;
-    config.cpu = rt_node->partition;                                     
-    config.priority = rt_node->priority;                                 
+    config.cpu = rt_node->partition;
+    config.priority = rt_node->priority;
     syslog(LOG_WARNING, "trying to create R%d", rt_node->res_id);
 
-    switch (rt_node->res_type) {                                         
-        case PERIODIC_POLLING:                                                
-        case SPORADIC_POLLING:                                                
-        case SOFT_POLLING:                                                    
-            config.polling_params.budget = ms2ns(rt_node->budget);           
-            config.polling_params.period = ms2ns(rt_node->period);           
-            config.polling_params.offset = ms2ns(rt_node->offset);           
+    switch (rt_node->res_type) {
+        case PERIODIC_POLLING:
+        case SPORADIC_POLLING:
+        case SOFT_POLLING:
+            config.polling_params.budget = ms2ns(rt_node->budget);
+            config.polling_params.period = ms2ns(rt_node->period);
+            config.polling_params.offset = ms2ns(rt_node->offset);
             config.polling_params.relative_deadline
                 = ms2ns(rt_node->deadline);
             break;
-        case SPORADIC_SERVER:                                                 
-            config.sporadic_server_params.budget = ms2ns(rt_node->budget);   
-            config.sporadic_server_params.period = ms2ns(rt_node->period);   
+        case SPORADIC_SERVER:
+            config.sporadic_server_params.budget = ms2ns(rt_node->budget);
+            config.sporadic_server_params.period = ms2ns(rt_node->period);
             break;
-        case DEFERRABLE_SERVER:                                               
-            config.deferrable_server_params.budget = ms2ns(rt_node->budget); 
-            config.deferrable_server_params.period = ms2ns(rt_node->period); 
-            config.deferrable_server_params.offset = ms2ns(rt_node->offset); 
+        case DEFERRABLE_SERVER:
+            config.deferrable_server_params.budget = ms2ns(rt_node->budget);
+            config.deferrable_server_params.period = ms2ns(rt_node->period);
+            config.deferrable_server_params.offset = ms2ns(rt_node->offset);
             config.deferrable_server_params.relative_deadline
-                = ms2ns(rt_node->deadline);                                    
-            break;                                                              
-        case CONSTANT_BANDWIDTH_SERVER:                                       
-        case HARD_CONSTANT_BANDWIDTH_SERVER:                                  
-        case CASH_CBS:                                                        
-        case FLEXIBLE_CBS:                                                    
-        case SLASH_SERVER:                                                    
-            config.cbs_params.budget = ms2ns(rt_node->budget);               
-            config.cbs_params.period = ms2ns(rt_node->period);               
+                = ms2ns(rt_node->deadline);
+            break;
+        case CONSTANT_BANDWIDTH_SERVER:
+        case HARD_CONSTANT_BANDWIDTH_SERVER:
+        case CASH_CBS:
+        case FLEXIBLE_CBS:
+        case SLASH_SERVER:
+            config.cbs_params.budget = ms2ns(rt_node->budget);
+            config.cbs_params.period = ms2ns(rt_node->period);
             break;
         default:
             ret = -1;
             break;
     }
     ret = reservation_create(rt_node->res_type, &config);
-    return ret; 
+    return ret;
 }
 
 int attach_node(struct rt_node_status_t *rt_status, pid_t tid)
@@ -245,7 +247,7 @@ int attach_node(struct rt_node_status_t *rt_status, pid_t tid)
     struct rt_task param;
     struct rt_node_t *rt_node = rt_status->node;
     struct sched_param linux_param;
-    int ret;
+	int ret;
 
     CALL_LITMUS( be_migrate_thread_to_cpu(tid, rt_node->partition) );
 
@@ -261,17 +263,17 @@ int attach_node(struct rt_node_status_t *rt_status, pid_t tid)
     linux_param.sched_priority = 0;
 
     CALL( sched_setscheduler(tid, SCHED_LITMUS, &linux_param) );
-    return 0;
+	return 0;
 }
 
 void thread_cleanup(void *args) {
     struct litros_thread_local_t *local = (struct litros_thread_local_t*)args;
-    
+
     pthread_mutex_unlock(global->mutex);
     close(local->event_fd);
 }
 
-void *check_file_changes(__attribute__ ((unused)) void *args) 
+void *check_file_changes(__attribute__ ((unused)) void *args)
 {
     int event_fd;
     int wd;
@@ -293,7 +295,7 @@ void *check_file_changes(__attribute__ ((unused)) void *args)
     }
 
     local.event_fd = event_fd;
-    
+
     pthread_cleanup_push(thread_cleanup, &local);
 
     wd = inotify_add_watch(event_fd, global->directory,
@@ -359,13 +361,15 @@ int switch_to_rt(pid_t pid)
         else {
             syslog(LOG_WARNING, "ROS node %s has been started with PID %d",
                 process_name, pid) ;
-            pthread_mutex_lock(global->mutex);
-            rt_status->pid = pid;
-            rt_status->is_rt = 1;
-            pthread_mutex_unlock(global->mutex);
+			pthread_mutex_lock(global->mutex);
+			rt_status->pid = pid;
+			pthread_mutex_unlock(global->mutex);
             CALL_LITMUS( create_reservation(rt_status->node) );
             CALL_LITMUS( attach_node(rt_status, pid) );
             CALL_LITMUS( init_litmus() );
+			pthread_mutex_lock(global->mutex);
+            rt_status->is_rt = 1;
+            pthread_mutex_unlock(global->mutex);
             return 0;
         }
     }
@@ -408,7 +412,10 @@ static int handle_proc_ev(int nl_sock)
 {
     int rc;
     pid_t p_pid;
+	pid_t t_gid;
+	pid_t tid;
     int ret;
+	struct rt_node_status_t * tmp;
 
     struct __attribute__ ((aligned(NLMSG_ALIGNTO))) {
         struct nlmsghdr nl_hdr;
@@ -430,10 +437,21 @@ static int handle_proc_ev(int nl_sock)
         }
         switch (nlcn_msg.proc_ev.what) {
             case PROC_EVENT_NONE:
-                printf("set mcast listen ok\n");
+                syslog(LOG_WARNING, "set mcast listen ok\n");
                 break;
+			case PROC_EVENT_FORK:
+				p_pid = nlcn_msg.proc_ev.event_data.fork.parent_pid;
+				tid = nlcn_msg.proc_ev.event_data.fork.child_pid;
+				syslog(LOG_WARNING, "%d forked %d\n", p_pid, tid);
+				tmp = get_node_by_pid(p_pid);
+				if (tmp) {
+					syslog(LOG_WARNING, "%s forked %d\n",
+					tmp->node->task_id, tid);
+				}
+			break;
             case PROC_EVENT_EXEC:
                 p_pid = nlcn_msg.proc_ev.event_data.exec.process_pid;
+				t_gid = nlcn_msg.proc_ev.event_data.exec.process_tgid;
                 ret = switch_to_rt(p_pid);
                 if (ret != ESRCH) {
                     if (ret == 0)
@@ -441,7 +459,7 @@ static int handle_proc_ev(int nl_sock)
                     else
                         syslog(LOG_ERR, "could not switch to RT mode");
                 }
-                break;                                                          
+                break;
             case PROC_EVENT_EXIT:
                 /** By default, ROS kills the previous node instance if the
                   * same node is started twice. It should be taken 
@@ -458,10 +476,10 @@ static int handle_proc_ev(int nl_sock)
                 break;
             default:
                 /* Do not log all messages, at least for now */
-                break;                                                          
+                break;
         }
     }
-    return 0;                                                                   
+    return 0;
 }
 
 static void on_shutdown(int sig)
@@ -471,15 +489,15 @@ static void on_shutdown(int sig)
     need_exit = true;
 }
 
-void litros_init(void) {
-
+int litros_init(void)
+{
     pid_t sid;
     struct sigaction sig;
 
     umask(0);
 
     openlog("litrosd", LOG_CONS | LOG_PID, LOG_DAEMON);
-    
+
     CALL_ASSIGNMENT( (sid = setsid()) );
 
     CALL( chdir("/") );
@@ -490,11 +508,10 @@ void litros_init(void) {
 
     memset(&sig, 0, sizeof(struct sigaction));
     sig.sa_handler = on_shutdown;
-     
+
     sigaction(SIGINT, &sig, NULL);
     sigaction(SIGTERM, &sig, NULL);
-
-    
+	return 0;
 }
 
 int check_params(struct rt_node_t *rt_node)
@@ -502,13 +519,13 @@ int check_params(struct rt_node_t *rt_node)
     if (rt_node->res_type == -1)
         return -1;
 
-    if (rt_node->period <= 0 || rt_node->budget <= 0 
+    if (rt_node->period <= 0 || rt_node->budget <= 0
             || (rt_node->budget >= rt_node->period) )
         return -1;
 
     if (rt_node->partition < 0)
         return -1;
-    
+
     return 0;
 }
 int parse_params(const char *args, struct rt_node_t *params)
@@ -688,7 +705,7 @@ int main(int argc, char **argv)
                 break;
             default:
                 usage("bad argument");
-                break;            
+                break;
         }
     }
 
@@ -702,7 +719,12 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     else if (pid > 0)
         exit(EXIT_SUCCESS);
-    litros_init();
+
+    ret = litros_init();
+	if (ret != 0) {
+		syslog(LOG_WARNING, "litros_init() failed");
+		return ret;
+	}
 
     dp = opendir(directory);
     if (!dp) {
@@ -719,8 +741,8 @@ int main(int argc, char **argv)
     global = malloc(sizeof(struct litros_global_t));
     global->directory = directory;
     global->mutex = malloc(sizeof(pthread_mutex_t));
-    CALL ( pthread_mutex_init(global->mutex, NULL) );
-    LIST_INIT(&global->head); 
+    CALL( pthread_mutex_init(global->mutex, NULL) );
+    LIST_INIT(&global->head);
 
     while ( (ep = readdir(dp)) ) {
         if (ep->d_type != DT_REG)
