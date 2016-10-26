@@ -32,7 +32,6 @@
     ret = exp; \
     if (ret != 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
-        closelog();\
         return ret; \
     } \
     else { \
@@ -45,7 +44,7 @@
     ret = exp; \
     if (ret < 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
-        closelog();\
+        syslog(LOG_ERR, "Error: %s", strerror(errno));\
         return ret; \
     }\
     else { \
@@ -63,6 +62,7 @@
         syslog(LOG_WARNING, "%s failed: tid: %d, res_id: %d, task_id:%s", \
         #exp, rt_status->pid, rt_status->node->res_id, \
         rt_status->node->task_id); \
+        syslog(LOG_ERR, "Error: %s", strerror(errno));\
         return ret; \
     } \
     else { \
@@ -178,7 +178,7 @@ static int set_proc_ev_listen(int nl_sock, bool enable)
     return 0;
 }
 
-static const char* get_process_name_by_pid(const int pid)                       
+static const char *get_process_name_by_pid(const int pid)                       
 {
     FILE *f;
     static char name[1024];
@@ -192,8 +192,37 @@ static const char* get_process_name_by_pid(const int pid)
                 name[size-1] = '\0';
         }
         fclose(f);
+        return basename(name);
     }
-    return basename(name);
+    else {
+        fclose(f);
+        return NULL;
+    }
+    
+}
+
+static const char *get_thread_type_by_tid(const int tgid, const int tid) 
+{
+    FILE *f;
+    static char filename[1024];
+    static char thread_name[16];
+    sprintf(filename, "/proc/%d/task/%d/comm", tgid, tid);
+    f = fopen(filename, "r");
+    if (f) {
+        size_t size;
+        size = fread(thread_name, sizeof(char), 16, f);
+        if(size>0) {
+            if (thread_name[size-1] == '\n')
+                thread_name[size-1] = '\0';
+        }
+        fclose(f);
+        return thread_name;
+    }
+    else {
+        fclose(f);
+        return NULL;
+    }
+
 }
 
 int create_reservation(struct rt_node_t *rt_node) 
@@ -340,7 +369,7 @@ void *check_file_changes(__attribute__ ((unused)) void *args)
     return NULL;
 }
 
-int switch_to_rt(pid_t pid)
+int switch_to_rt(pid_t pid, const char *thread_name)
 {
     /** use a hash table or something since this operation is
      *  on the critical path and any further ways to avoid
@@ -350,7 +379,11 @@ int switch_to_rt(pid_t pid)
     int ret;
     struct rt_node_status_t *rt_status;
 
-    process_name = get_process_name_by_pid(pid);
+    if (!thread_name)
+        process_name = get_process_name_by_pid(pid);
+    else
+        process_name = thread_name;
+
     rt_status = get_node_by_task_id(process_name);
     if (rt_status) {
         if (rt_status->is_rt) {
@@ -364,6 +397,13 @@ int switch_to_rt(pid_t pid)
 			pthread_mutex_lock(global->mutex);
 			rt_status->pid = pid;
 			pthread_mutex_unlock(global->mutex);
+            /** If this is a thread, then switch its scheduling policy
+              * to SCHED_NORMAL first. This is necessary since reservation
+              * parameters and scheduling policy of a thread is inherited
+              * from the process that created the thread. By
+              */
+            if (thread_name)
+                CALL_LITMUS( task_mode_with_pid(BACKGROUND_TASK, pid) );
             CALL_LITMUS( create_reservation(rt_status->node) );
             CALL_LITMUS( attach_node(rt_status, pid) );
             CALL_LITMUS( init_litmus() );
@@ -413,9 +453,10 @@ static int handle_proc_ev(int nl_sock)
     int rc;
     pid_t p_pid;
 	pid_t t_gid;
-	pid_t tid;
     int ret;
 	struct rt_node_status_t * tmp;
+    char thread_name[64];
+    const char *thread_type;
 
     struct __attribute__ ((aligned(NLMSG_ALIGNTO))) {
         struct nlmsghdr nl_hdr;
@@ -440,19 +481,31 @@ static int handle_proc_ev(int nl_sock)
                 syslog(LOG_WARNING, "set mcast listen ok\n");
                 break;
 			case PROC_EVENT_FORK:
-				p_pid = nlcn_msg.proc_ev.event_data.fork.parent_pid;
-				tid = nlcn_msg.proc_ev.event_data.fork.child_pid;
-				syslog(LOG_WARNING, "%d forked %d\n", p_pid, tid);
-				tmp = get_node_by_pid(p_pid);
+				t_gid = nlcn_msg.proc_ev.event_data.fork.child_tgid;
+				p_pid = nlcn_msg.proc_ev.event_data.fork.child_pid;
+				tmp = get_node_by_pid(t_gid);
 				if (tmp) {
-					syslog(LOG_WARNING, "%s forked %d\n",
-					tmp->node->task_id, tid);
+                    thread_type = get_thread_type_by_tid(t_gid, p_pid);
+                    sprintf(thread_name, "%s_%s", tmp->node->task_id,
+                        thread_type);
+                    syslog(LOG_WARNING, "%s forked %s with TID %d", tmp->node->task_id,
+                    thread_name, p_pid);
+                    ret = switch_to_rt(p_pid, thread_name);
+                    if (ret != ESRCH) {
+                        if (ret == 0)
+                            syslog(LOG_WARNING, "switched to RT mode");
+                        else
+                            syslog(LOG_ERR, "could not switch to RT mode");
+                    }
+                    else
+                        syslog(LOG_WARNING, "%s does not have configuration"
+                            " file. It will be executed on reservation of %s",
+                            thread_name, tmp->node->task_id);
 				}
-			break;
+			    break;
             case PROC_EVENT_EXEC:
                 p_pid = nlcn_msg.proc_ev.event_data.exec.process_pid;
-				t_gid = nlcn_msg.proc_ev.event_data.exec.process_tgid;
-                ret = switch_to_rt(p_pid);
+                ret = switch_to_rt(p_pid, NULL);
                 if (ret != ESRCH) {
                     if (ret == 0)
                         syslog(LOG_WARNING, "switched to RT mode");
@@ -471,7 +524,7 @@ static int handle_proc_ev(int nl_sock)
                     if (ret == 0)
                         syslog(LOG_WARNING, "ROS node is terminated successfully");
                     else
-                        syslog(LOG_ERR, "ROS not could not terminate!");
+                        syslog(LOG_ERR, "ROS node could not be terminated!");
                 }
                 break;
             default:
@@ -652,7 +705,8 @@ int parse_and_insert(const char * filename, const char *filepath)
                     " ,skipping!", it->node->task_id, filename);
                     goto err;
                 }
-                else if (it->node->res_id == tmp_status->node->res_id) {
+                else if ( (it->node->res_id == tmp_status->node->res_id) &&
+                    (it->node->partition == tmp_status->node->partition) ) {
                     syslog(LOG_WARNING, "res_id %d in file %s is already added"
                     " ,skipping!", it->node->res_id, filename);
                     goto err;
@@ -782,6 +836,7 @@ int main(int argc, char **argv)
     free(global);
 
 out:
+    closelog();
     close(nl_sock);
     return ret;
 }
