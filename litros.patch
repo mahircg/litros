@@ -1,6 +1,6 @@
-diff -rupN roscpp-original/src/libros/init.cpp roscpp/src/libros/init.cpp
---- roscpp-original/src/libros/init.cpp	2016-10-26 15:44:49.633036724 +0200
-+++ roscpp/src/libros/init.cpp	2016-10-26 15:42:15.645126604 +0200
+diff -ruN roscpp-original/src/libros/init.cpp roscpp/src/libros/init.cpp
+--- roscpp-original/src/libros/init.cpp	2016-10-27 11:21:44.761163830 +0200
++++ roscpp/src/libros/init.cpp	2016-10-27 11:24:21.418471556 +0200
 @@ -64,6 +64,8 @@
  
  #include <cstdlib>
@@ -10,62 +10,39 @@ diff -rupN roscpp-original/src/libros/init.cpp roscpp/src/libros/init.cpp
  namespace ros
  {
  
-@@ -341,12 +343,21 @@ void start()
+@@ -341,10 +343,15 @@
  
    initInternalTimerManager();
  
 +  char name[64];
 +  prctl(PR_GET_NAME, name);
 +
-+    prctl(PR_SET_NAME, "Topic");
    TopicManager::instance()->start();
-+  prctl(PR_SET_NAME, "Service");
    ServiceManager::instance()->start();
-+  prctl(PR_SET_NAME, "Conn");
    ConnectionManager::instance()->start();
 +  prctl(PR_SET_NAME, "Poll");
    PollManager::instance()->start();
 +  prctl(PR_SET_NAME, "XML");
    XMLRPCManager::instance()->start();
  
-+    prctl(PR_SET_NAME, name);
    if (!(g_init_options & init_options::NoSigintHandler))
+@@ -356,6 +363,7 @@
+ 
+   if (!(g_init_options & init_options::NoRosout))
    {
-     signal(SIGINT, basicSigintHandler);
-diff -rupN roscpp-original/src/libros/init.cpp.rej roscpp/src/libros/init.cpp.rej
---- roscpp-original/src/libros/init.cpp.rej	1970-01-01 01:00:00.000000000 +0100
-+++ roscpp/src/libros/init.cpp.rej	2016-10-26 15:33:17.701734945 +0200
-@@ -0,0 +1,33 @@
-+--- src/libros/init.cpp	2016-10-26 15:14:58.402636091 +0200
-++++ src/libros/init.cpp	2016-10-26 15:29:10.302634014 +0200
-+@@ -64,8 +64,6 @@
-+ 
-+ #include <cstdlib>
-+ 
-+-#include <sys/prctl.h>
-+-
-+ namespace ros
-+ {
-+ 
-+@@ -343,21 +341,12 @@ void start()
-+ 
-+   initInternalTimerManager();
-+ 
-+-	char name[64];
-+-	prctl(PR_GET_NAME, name);
-+-
-+-	prctl(PR_SET_NAME, "Topic");
-+   TopicManager::instance()->start();
-+-	prctl(PR_SET_NAME, "Service");
-+   ServiceManager::instance()->start();
-+-	prctl(PR_SET_NAME, "Conn");
-+   ConnectionManager::instance()->start();
-+-	prctl(PR_SET_NAME, "Poll");
-+   PollManager::instance()->start();
-+-	prctl(PR_SET_NAME, "XML");
-+   XMLRPCManager::instance()->start();
-+ 
-+-	prctl(PR_SET_NAME, name);
-+   if (!(g_init_options & init_options::NoSigintHandler))
-+   {
-+     signal(SIGINT, basicSigintHandler);
++    prctl(PR_SET_NAME, "LOG");
+     g_rosout_appender = new ROSOutAppender;
+     ros::console::register_appender(g_rosout_appender);
+   }
+@@ -411,9 +419,10 @@
+   }
+ 
+   if (g_shutting_down) goto end;
+-
++  prctl(PR_SET_NAME, "QUEUE");
+   g_internal_queue_thread = boost::thread(internalCallbackQueueThreadFunc);
+   getGlobalCallbackQueue()->enable();
++  prctl(PR_SET_NAME, name);
+ 
+   ROSCPP_LOG_DEBUG("Started node [%s], pid [%d], bound on [%s], xmlrpc port [%d], tcpros port [%d], using [%s] time", 
+ 		   this_node::getName().c_str(), getpid(), network::getHost().c_str(), 

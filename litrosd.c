@@ -18,7 +18,6 @@
 #include <dirent.h>
 #include <libgen.h>
 
-
 #include "cJSON.h"
 #include "common.h"
 #include "litmus.h"
@@ -32,6 +31,7 @@
     ret = exp; \
     if (ret != 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
+        syslog(LOG_ERR, "Error: %s", strerror(errno));\
         return ret; \
     } \
     else { \
@@ -178,51 +178,45 @@ static int set_proc_ev_listen(int nl_sock, bool enable)
     return 0;
 }
 
-static const char *get_process_name_by_pid(const int pid)                       
+static inline char *read_name(const char* filename)
 {
     FILE *f;
-    static char name[1024];
-    sprintf(name, "/proc/%d/cmdline", pid);
-    f = fopen(name, "r");
+    static char name[256];
+    size_t size;
+
+    f = fopen(filename, "r");
+
     if (f) {
-        size_t size;
-        size = fread(name, sizeof(char), 1024, f);
+        size = fread(name, sizeof(char), sizeof(name), f);
         if(size>0) {
             if (name[size-1] == '\n')
                 name[size-1] = '\0';
         }
         fclose(f);
-        return basename(name);
+        return name;
     }
     else {
         fclose(f);
         return NULL;
     }
-    
+}
+static const char *get_process_name_by_pid(const int pid)                       
+{
+    static char filename[128];
+    static char *name;
+    sprintf(filename, "/proc/%d/cmdline", pid);
+    name = read_name(filename);
+    if (name)
+        return basename(name);
+    else
+        return NULL;
 }
 
 static const char *get_thread_type_by_tid(const int tgid, const int tid) 
 {
-    FILE *f;
-    static char filename[1024];
-    static char thread_name[16];
+    static char filename[128];
     sprintf(filename, "/proc/%d/task/%d/comm", tgid, tid);
-    f = fopen(filename, "r");
-    if (f) {
-        size_t size;
-        size = fread(thread_name, sizeof(char), 16, f);
-        if(size>0) {
-            if (thread_name[size-1] == '\n')
-                thread_name[size-1] = '\0';
-        }
-        fclose(f);
-        return thread_name;
-    }
-    else {
-        fclose(f);
-        return NULL;
-    }
-
+    return read_name(filename);
 }
 
 int create_reservation(struct rt_node_t *rt_node) 
