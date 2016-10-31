@@ -11,6 +11,8 @@ LDFLAGS			= -L${LIBLITMUS}
 LDLIBS 			= -llitmus -lcjson -lm -lpthread
 CPPFLAGS		= ${HEADERS}
 CFLAGS			= -O2 -g -Wall -Wextra -Wshadow -Wdeclaration-after-statement
+DEPS			= litros_rt_param.h
+OBJ				= litrosd.o litros_rt_param.o
 
 ifeq (${CC},cc)
 CC = gcc
@@ -18,19 +20,21 @@ endif
 
 .PHONY: clean all
 
+%.o: %.c $(DEPS)
+	$(CC) -c -o $@ $< $(CFLAGS) $(CPPFLAGS) $(LDLIBS) $(LDFLAGS) 
+
 all: cjson litrosd
 
 cjson:
 	$(MAKE) -C ${cJSON}
 	$(MAKE) -C ${cJSON} install
 
-litrosd: litros_rt_param.c litrosd.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -c litros_rt_param.c $(LDLIBS)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o litrosd litros_rt_param.o litrosd.c $(LDLIBS)
+litrosd: $(OBJ)
+	$(CC) -o $@ $^ $(CFLAGS) $(CPPFLAGS) $(LDLIBS) $(LDFLAGS)
 
 clean:
 	$(MAKE) -C ${cJSON} clean
-	rm litrosd litros_rt_param.o
+	rm litrosd *.o
 
 config-ok  := $(shell test -d "${cJSON}" || echo invalid path. )
 ifneq ($(strip $(config-ok)),)

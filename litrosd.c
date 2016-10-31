@@ -12,11 +12,10 @@
 #include <linux/cn_proc.h>
 #include <signal.h>
 #include <stdbool.h>
-#include <sys/inotify.h>
 #include <pthread.h>
 #include <sys/queue.h>
-#include <dirent.h>
 #include <libgen.h>
+#include <dirent.h>
 
 #include "cJSON.h"
 #include "common.h"
@@ -26,8 +25,12 @@
 #define MAX_CONFIG_LEN 1024
 #define RETRY_COUNT 50
 
+/* 
+ * This macro assumes there is an integer variable ret and struct rt_status
+ * defined in the current scope.
+ */
+
 #define CALL( exp ) do { \
-	int ret; \
     ret = exp; \
     if (ret != 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
@@ -40,7 +43,6 @@
 } while (0)
 
 #define CALL_ASSIGNMENT( exp ) do { \
-    int ret; \
     ret = exp; \
     if (ret < 0) {\
         syslog(LOG_ALERT, "%s failed: %m\n", #exp);\
@@ -51,10 +53,6 @@
         syslog(LOG_WARNING, "%s ok.\n", #exp); \
 	} \
 } while (0)
-
-/** This macro assumes there is an integer variable ret and struct rt_status
-  * defined in the current scope.
-  */
 
 #define CALL_LITMUS( exp ) do { \
     ret = exp; \
@@ -110,8 +108,9 @@ static void usage(char *error) {
 }
 
 
-/** Functions related to netlink connector are taken from
- *  http://bewareofgeek.livejournal.com/2945.html
+/* 
+ * Functions related to netlink connector are taken from
+ * http://bewareofgeek.livejournal.com/2945.html
  */
  
 /*
@@ -289,85 +288,12 @@ int attach_node(struct rt_node_status_t *rt_status, pid_t tid)
 	return 0;
 }
 
-void thread_cleanup(void *args) {
-    struct litros_thread_local_t *local = (struct litros_thread_local_t*)args;
-
-    pthread_mutex_unlock(global->mutex);
-    close(local->event_fd);
-}
-
-void *check_file_changes(__attribute__ ((unused)) void *args)
-{
-    int event_fd;
-    int wd;
-    struct litros_thread_local_t local;
-    char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-    const struct inotify_event *event;
-    char *ptr;
-    int len;
-
-    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
-
-    memset(&local, 0, sizeof(struct litros_thread_local_t));
-
-    event_fd = inotify_init();
-    if (event_fd < 0) {
-        syslog(LOG_WARNING, "inotify_init() failed. litrosd will not detect"
-        "changes in configuration file directory");
-        pthread_exit(NULL);
-    }
-
-    local.event_fd = event_fd;
-
-    pthread_cleanup_push(thread_cleanup, &local);
-
-    wd = inotify_add_watch(event_fd, global->directory,
-                IN_CREATE | IN_DELETE | IN_MODIFY);
-
-    if (wd < 0) {
-        syslog(LOG_WARNING, "inotify_add_watch() failed. litrosd will not detect"
-        " changes in configuration file directory");
-        pthread_exit(NULL);
-    }
-    
-    while (!need_exit) {
-        len = read(event_fd, buf, sizeof(buf));
-        if (len == -1) { 
-            if (errno == EINTR)
-                continue;
-            syslog(LOG_ERR, "inotify_event read error");
-        }
-        /** Acquire the mutex, check if a file is modified and reflect the
-         *  changes if necessary.
-         */
-        for (ptr = buf; ptr < buf + len; 
-            ptr += sizeof(struct inotify_event) + event->len) {
-
-            event = (const struct inotify_event *) ptr;
-            if (event->mask & IN_CREATE) {
-                syslog(LOG_WARNING, "File %s created. Trying to"
-                " parse and add to node list", event->name);
-                parse_and_insert(event->name, global->directory);
-            }
-            if (event->mask & IN_DELETE)
-                syslog(LOG_WARNING, "IN_DELETE: %s", event->name);
-            if (event->mask & IN_MODIFY)
-                syslog(LOG_WARNING, "IN_MODIFY: %s", event->name);
-        }
-    }
-    /**
-     * Every cleanup_push must be paired with a cleanup_pop
-     * Otherwise, gcc keeps emitting esoteric warnings!
-     */
-    pthread_cleanup_pop(1);
-    return NULL;
-}
-
 int switch_to_rt(pid_t pid, const char *thread_name)
 {
-    /** use a hash table or something since this operation is
-     *  on the critical path and any further ways to avoid
-     *  O(N) list traversal will improve the performance
+    /* 
+     * use a hash table or something since this operation is
+     * on the critical path and any further ways to avoid
+     * O(N) list traversal will improve the performance
      */
     const char *process_name;
     int ret;
@@ -391,11 +317,12 @@ int switch_to_rt(pid_t pid, const char *thread_name)
 			pthread_mutex_lock(global->mutex);
 			rt_status->pid = pid;
 			pthread_mutex_unlock(global->mutex);
-            /** If this is a thread, then switch its scheduling policy
-              * to SCHED_NORMAL first. This is necessary since reservation
-              * parameters and scheduling policy of a thread is inherited
-              * from the process that created the thread. By
-              */
+            /* 
+             * If this is a thread, then switch its scheduling policy
+             * to SCHED_NORMAL first. This is necessary since reservation
+             * parameters and scheduling policy of a thread is inherited
+             * from the process that created the thread. By
+             */
             if (thread_name)
                 CALL_LITMUS( task_mode_with_pid(BACKGROUND_TASK, pid) );
             CALL_LITMUS( create_reservation(rt_status->node) );
@@ -538,6 +465,7 @@ static void on_shutdown(int sig)
 
 int litros_init(void)
 {
+    int ret;
     pid_t sid;
     struct sigaction sig;
 
@@ -732,8 +660,8 @@ err:
 
 int main(int argc, char **argv)
 {
+
     pid_t pid;
-    pthread_t io_tid;
 
     int nl_sock;
     int ret = EXIT_SUCCESS;
@@ -804,8 +732,6 @@ int main(int argc, char **argv)
     }
     if (errno == EBADF)
         syslog(LOG_ERR, "readdir(): %s", strerror(errno));
-
-    pthread_create(&io_tid, NULL, check_file_changes, NULL);
 
     CALL_ASSIGNMENT( nl_sock = nl_connect() );
     ret = set_proc_ev_listen(nl_sock, true);
