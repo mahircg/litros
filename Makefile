@@ -1,4 +1,4 @@
-cJSON ?= ../cJSON
+cJSON ?= lib/cJSON
 LIBLITMUS ?= /media/litmus/liblitmus
 
 
@@ -6,12 +6,11 @@ HEADERS			?= -I${cJSON} -I${LIBLITMUS}/include
 HEADERS			+= -I${LIBLITMUS}/arch/x86/include 
 HEADERS			+= -I${LIBLITMUS}/arch/x86/include/uapi 
 HEADERS			+= -I${LIBLITMUS}/arch/x86/include/generated/uapi
-#prefix ?= /usr/local
 
 LDFLAGS			= -L${LIBLITMUS}
 LDLIBS 			= -llitmus -lcjson -lm -lpthread
 CPPFLAGS		= ${HEADERS}
-CFLAGS			= -g -Wall -Wextra -Wdeclaration-after-statement
+CFLAGS			= -O2 -g -Wall -Wextra -Wshadow -Wdeclaration-after-statement
 
 ifeq (${CC},cc)
 CC = gcc
