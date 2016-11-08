@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 cJSON ?= lib/cJSON
-LIBLITMUS ?= /media/litmus/liblitmus
+LIBLITMUS ?= ../liblitmus
 INSTALL_TARGET ?= /etc/init.d
 
 
@@ -14,7 +14,7 @@ LDLIBS 			= -llitmus -lcjson -lm -lpthread
 CPPFLAGS		= ${HEADERS}
 CFLAGS			= -O2 -g -Wall -Wextra -Wshadow -Wdeclaration-after-statement
 DEPS			= litros_rt_param.h
-OBJ				= litrosd.o litros_rt_param.o
+OBJ				= litrosd.o litros_rt_param.o ${cJSON}/cJSON.o
 TARGET			= litrosd
 
 ifeq (${CC},cc)
@@ -22,6 +22,8 @@ CC = gcc
 endif
 
 .PHONY: clean all install
+
+include .config
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS) $(CPPFLAGS) $(LDLIBS) $(LDFLAGS) 
@@ -37,19 +39,17 @@ $(TARGET): $(OBJ)
 
 clean:
 	$(MAKE) -C ${cJSON} clean
-	rm $(TARGET) *.o
+	rm -rf $(TARGET) *.o
 
 install: $(TARGET)
 	@if [ -f $(TARGET) ]; \
 	then \
-		source .config; \
 		if [ ! -d ${LITROS_DEFAULT_DIR} ]; \
 			then \
 			echo "Creating configuration folder ${LITROS_DEFAULT_DIR}"; \
 			mkdir ${LITROS_DEFAULT_DIR}; \
 			echo "Creating config file ${LITROS_CONFIG_TARGET}"; \
-			echo "#!/usr/bin/env bash">${LITROS_CONFIG_TARGET}; \
-			echo "rt_folder=\"${LITROS_DEFAULT_CONFIG_DIR}\"">>${LITROS_CONFIG_TARGET}; \
+			echo "rt_folder=${LITROS_DEFAULT_CONFIG_DIR}">>${LITROS_CONFIG_TARGET} ;\
 			echo "Creating default rt_config folder ${LITROS_DEFAULT_CONFIG_DIR}"; \
 			mkdir ${LITROS_DEFAULT_CONFIG_DIR}; \
 		fi; \

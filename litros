@@ -30,13 +30,18 @@ function START
 		echo "$EXEC is already running. Cannot start multiple instances"
 		exit 1
 	else
-		echo "Starting $EXEC"
-		./$EXEC -d $CONF_DIR
-		if [ $? -eq 0]
+		if [ -f $EXEC ]
 		then
-			echo "Started $EXEC"
+			echo "Starting $EXEC"
+			./$EXEC -d $CONF_DIR
+			if [ $? -eq 0 ]
+			then
+				echo "Started $EXEC"
+			else
+				echo "Could not start $EXEC. Check the logs"
+			fi
 		else
-			echo "Could not start $EXEC. Check the logs"
+			echo "$EXEC is not found. Did you run make?"
 		fi
 	fi
 }
@@ -62,7 +67,7 @@ while getopts :c:d:h FLAG; do
 			COMMAND=$OPTARG
 			;;
 		d)
-			CONF_DIR = $OPTARG
+			CONF_DIR=$OPTARG
 			;;
 		h)
 			HELP
