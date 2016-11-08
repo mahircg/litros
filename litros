@@ -1,4 +1,96 @@
 #!/bin/bash
+
+EXEC=litrosd
+COMMAND=" "
 source .config
 source $LITROS_CONFIG_TARGET
-./litrosd -d $rt_folder
+CONF_DIR=$rt_folder
+
+function STOP
+{
+	if pgrep $EXEC > /dev/null
+	then
+		echo "Stopping $EXEC"
+		if kill `pidof $EXEC` > /dev/null
+		then
+			echo "$EXEC terminated with errors. Check the log"
+		else
+			echo "Terminated $EXEC"
+		fi
+    else
+		echo "$EXEC is not running!"
+		exit 1
+	fi 
+}
+
+function START
+{
+	if pgrep $EXEC > /dev/null
+	then
+		echo "$EXEC is already running. Cannot start multiple instances"
+		exit 1
+	else
+		echo "Starting $EXEC"
+		./$EXEC -d $CONF_DIR
+		if [ $? -eq 0]
+		then
+			echo "Started $EXEC"
+		else
+			echo "Could not start $EXEC. Check the logs"
+		fi
+	fi
+}
+
+function HELP
+{
+	echo -e \\n"Help documentation for $SCRIPT"\\n
+	echo -e "Basic usage: $SCRIPT -c <command> -d <directory>"\\n
+	echo "-c	-- Command to perform. Options are: start, stop, restart"
+	echo "-d 	-- Configuration file directory. By default, the location is 
+	$rt_folder"
+	exit 1
+}
+
+NUMARGS=$#
+if [ $NUMARGS -eq 0 ]; then
+    HELP
+fi
+
+while getopts :c:d:h FLAG; do
+	case $FLAG in
+		c)
+			COMMAND=$OPTARG
+			;;
+		d)
+			CONF_DIR = $OPTARG
+			;;
+		h)
+			HELP
+			;;
+		\?)
+			echo -e \\n "Option $OPTARG not recognized"
+			HELP
+			;;
+	esac
+done
+
+case $COMMAND in
+	" ")
+		echo "Command must be specified"
+		exit 1
+		;;
+	"start")
+		START
+		;;
+	"stop")
+		STOP
+		;;
+	"restart")
+		STOP
+		START
+		;;
+	*)
+		echo "Wrong command!"
+		exit 1
+		;;
+esac	
