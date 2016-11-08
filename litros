@@ -1,0 +1,4 @@
+#!/bin/bash
+source .config
+source $LITROS_CONFIG_TARGET
+./litrosd -d $rt_folder
