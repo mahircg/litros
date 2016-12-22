@@ -243,7 +243,7 @@ litrosd[3329]: config inserted into the list
 
 After the daemon is initialized successively, every ROS node with a valid mapping will be assigned to the corresponding reservation.
 
-Starting the `talker` node (under `test` package) with 'rosrun test talker' command will trigger the daemon to transition the node process into real-time mode.
+Starting the `talker` node (under `test` package) with `rosrun test talker` command will trigger the daemon to transition the node process into real-time mode.
 
 ```
 litrosd[3329]: trying to create R100
